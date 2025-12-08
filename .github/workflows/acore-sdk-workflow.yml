@@ -1,0 +1,341 @@
+name: A-core sdk workflow
+
+on:
+  workflow_call:
+    inputs:
+      bump-type:
+        required: false
+        type: string
+      test-image-repo:
+        required: true
+        type: string
+      prod-image-repo:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:   
+  check-pr-label:
+    name: Check pull request label
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check pull request label
+        id: check
+        uses: XX9-YE-SONG/acore-cicd-templates/.github/actions/check-pr-label@main
+
+      - name: Fail if incorrect label count
+        if: steps.check.outputs.status == 'failure'
+        run: |
+          echo "Error: Pull request must have exactly one of these labels: major, minor, patch, none. Please recreate PR."
+          exit 1
+
+  determine-version:
+    name: Determine version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      new_version: ${{ steps.det.outputs.new_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Determine version
+        id: det
+        uses: XX9-YE-SONG/acore-cicd-templates/.github/actions/determine-version@main
+        with:
+          bump-type: ${{ inputs.bump-type }}
+
+  build-and-scan-test:
+    name: Build and scan image (test)
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      IMAGE_REPO: ${{ inputs.test-image-repo }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute full image name (lowercase)
+        id: name
+        run: |
+          IMAGE_NAME=$(echo "${{ env.IMAGE_REPO }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image with Buildah
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          context: .
+          containerfiles: Containerfile
+          image: ${{ steps.name.outputs.image }}
+          tags: build
+          oci: true
+          
+      - name: Enable podman socket for trivy
+        run: |
+          systemctl --user enable --now podman.socket      
+          systemctl --user status podman.socket
+          wget https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+  
+      - name: Trivy scan 
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.name.outputs.image }}:build
+          format: template
+          template: '@html.tpl'   # HTML report
+          output: trivy-report.html
+          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+          exit-code: '0'   
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trivy report
+          path: trivy-report.html
+          retention-days: 1
+
+  Build-and-push-test:
+    name: Build and push image (test)
+    if: github.ref != 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.bump-type == 'push to test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPO: ${{ inputs.test-image-repo }}
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute full image name (lowercase)
+        id: name
+        run: |
+          IMAGE_NAME=$(echo "${{ env.IMAGE_REPO }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image tags to push
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=raw,value=${{ github.ref_name }}-${{ github.run_number }}
+
+      - name: Podman login to GHCR
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image with Buildah
+        id: build-image
+        uses: redhat-actions/buildah-build@v2
+        with:
+          context: .
+          containerfiles: ./Containerfile
+          image: ${{ steps.name.outputs.image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          oci: true
+          
+      - name: Push to GitHub Container Repository
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          tags: ${{ steps.meta.outputs.tags }}
+
+  build-prod:
+    name: Build image (prod)
+    needs: [determine-version]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_REPO: ${{ inputs.prod-image-repo }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Compute full image name (lowercase)
+        id: name
+        run: |
+          IMAGE_NAME=$(echo "${{ env.IMAGE_REPO }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.determine-version.outputs.new_version }}
+          
+      - name: Build image with Buildah
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          context: .
+          containerfiles: ./Containerfile
+          image: ${{ steps.name.outputs.image }}
+          tags: |
+            build
+          labels: ${{ steps.meta.outputs.labels }}
+          oci: true
+
+      - name: Save image to docker-archive
+        shell: bash
+        run: |
+          podman image save --format docker-archive -o ./image.tar "${{ steps.name.outputs.image }}:build"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-image
+          path: |
+            trivy-report.txt
+            ./image.tar
+          retention-days: 1
+
+  scan-prod:
+    name: Scan image (prod)
+    needs: [build-prod]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_REPO: ${{ inputs.prod-image-repo }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: built-image
+          path: .
+          
+      - name: Prepare trivy
+        run: |
+          wget https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+        
+      - name: Trivy scan 
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          input: ./image.tar   
+          format: template
+          template: '@html.tpl'   # HTML report
+          output: trivy-report.html
+          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+          exit-code: '0'
+          
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trivy report
+          path: |
+            trivy-report.html
+          retention-days: 1
+
+  push-image-prod:
+    name: Push image (prod) 
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    env:
+      IMAGE_REPO: ${{ inputs.prod-image-repo }}
+      REGISTRY: ghcr.io
+    runs-on: ubuntu-latest
+    needs: [determine-version, build-prod]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: built-image
+          path: .
+
+      - name: Compute full image name (lowercase)
+        id: name
+        run: |
+          IMAGE_NAME=$(echo "${{ env.IMAGE_REPO }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image tags to push
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=raw,value=${{ needs.determine-version.outputs.new_version }}
+
+      - name: Podman login to GHCR
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load image from tar
+        shell: bash
+        run: |
+          podman load -i image.tar
+
+      - name: Push all tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.name.outputs.image }}"
+          LOCAL_TAG="${IMAGE}:build"
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Tagging and pushing $tag"
+            podman tag "$LOCAL_TAG" "$tag"
+            podman push "$tag"
+          done
+
+  bump-version:
+    name: Bump version (git tag)
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs: [determine-version, push-image-prod]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag new version if needed
+        uses: XX9-YE-SONG/acore-cicd-templates/.github/actions/bump-version@main
+        with:
+          new_version: ${{ needs.determine-version.outputs.new_version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
