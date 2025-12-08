@@ -1,0 +1,121 @@
+name: "Determine Version"
+description: "Determine next semantic version for main branch on push or workflow_dispatch"
+inputs:
+  bump-type:
+    description: "Bump type for workflow_dispatch (major|minor|patch|none)"
+    required: false
+    default: ""
+outputs:
+  new_version:
+    description: "Calculated new version tag (e.g., v1.2.3) or the currente version when bump type is 'none'"
+    value: ${{ steps.set-output.outputs.new_version }}
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout tags
+      shell: bash
+      run: |
+        git fetch --tags --force
+
+    - name: Handle push event (PR label-based bump)
+      id: push
+      if: ${{ github.event_name == 'push' }}
+      shell: bash
+      run: |
+        LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+          | sort -V \
+          | tail -n 1 || true)
+        if [ -z "$LATEST_TAG" ]; then
+          echo "No existing version tag found. Initializing to v0.1.0."
+          echo "new_version=v0.1.0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        MERGE_COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+        PR_ID=$(echo "$MERGE_COMMIT_MESSAGE" | grep -oP 'Merge pull request #\K\d+' || true)
+        if [ -z "$PR_ID" ]; then
+          echo "::error::Could not find a Pull Request ID in the merge commit message. Please trigger the workflow and select bump type manually."
+          exit 1
+        fi
+
+        ALL_PR_LABELS=$(gh pr view "$PR_ID" --json labels -q '.labels[].name' || true)
+        VALID_LABEL=$(echo "$ALL_PR_LABELS" | grep -E '^(major|minor|patch|none)$' | head -n 1 || true)
+        if [ -z "$VALID_LABEL" ]; then
+          echo "::error::No valid version label found on PR. Expect one of {major, minor, patch, none}."
+          exit 1
+        fi
+        
+        CURRENT_VERSION=${LATEST_TAG#v}
+        
+        if [ "$VALID_LABEL" = "none" ]; then
+          echo "PR has 'none' label. No version bump. Use current version v$CURRENT_VERSION"
+          echo "new_version=v$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+        case "$VALID_LABEL" in
+          major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH+1)) ;;
+        esac
+        NEW_VERSION="v$MAJOR.$MINOR.$PATCH"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "new_version=$NEW_VERSION"
+
+
+    - name: Handle workflow_dispatch (input bump)
+      id: dispatch
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      shell: bash
+      run: |
+        BUMP_TYPE="${{ inputs.bump-type }}"
+        # if HEAD already tagged, reuse
+        HEAD_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -n 1  || true)
+        if [ -n "$HEAD_TAG" ]; then
+          echo "new_version=$HEAD_TAG" >> $GITHUB_OUTPUT
+          echo "HEAD already tagged as $HEAD_TAG, reuse"
+          exit 0
+        fi
+
+        LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+          | sort -V \
+          | tail -n 1 || true)
+        if [ -z "$LATEST_TAG" ]; then
+          echo "new_version=v0.1.0" >> $GITHUB_OUTPUT
+          echo "No tag detected, initialize version as v0.1.0"
+          exit 0
+        fi
+
+        CURRENT_VERSION=${LATEST_TAG#v}
+        
+        if [ "$BUMP_TYPE" = "none" ]; then
+          echo "Bump type is none. No version bump. Use current version v$CURRENT_VERSION"
+          echo "new_version=v$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+        case "$BUMP_TYPE" in
+          major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH+1)) ;;
+          *) echo "::error::Invalid bump-type: $BUMP_TYPE (use major|minor|patch|none)"; exit 1 ;;
+        esac
+        
+        NEW_VERSION="v$MAJOR.$MINOR.$PATCH"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "new_version=$NEW_VERSION"
+
+    - name: Set output
+      id: set-output
+      shell: bash
+      run: |
+        # Prefer push result, then dispatch
+        if [ -n "${{ steps.push.outputs.new_version }}" ]; then
+          echo "new_version=${{ steps.push.outputs.new_version }}" >> $GITHUB_OUTPUT
+        else
+          echo "new_version=${{ steps.dispatch.outputs.new_version }}" >> $GITHUB_OUTPUT
+        fi
