@@ -34,7 +34,7 @@ jobs:
 
       - name: Build image with Buildah
         run: |
-          podman build -t ${{ env.IMAGE_NAME }}:build .--systemd=false --cgroup-manager=cgroupfs
+          podman build -t ${{ env.IMAGE_NAME }}:build . --systemd=false --cgroup-manager=cgroupfs
 
 
       - name: Trivy scan 
