@@ -1,5 +1,5 @@
 name: "Check PR Version Label"
-description: "Ensure exactly one of {major, minor, patch, none} labels exists on PR"
+description: "Ensures that a Pull Request contains exactly one valid version label among {major, minor, patch, none}. This action parses the PR event payload, filters version-related labels, and outputs whether the validation succeeded along with the detected label."
 inputs: {}
 outputs:
   status:
@@ -15,9 +15,14 @@ runs:
       id: count-labels
       shell: bash
       run: |
+        # Extract PR labels and keep only version-related ones: major/minor/patch/none
         VALID_LABELS=$(jq -r '.pull_request.labels[].name' "$GITHUB_EVENT_PATH" | grep -E '^(major|minor|patch|none)$' || true)
+
+        # Count how many valid version labels were found (0 means none)
         LABEL_COUNT=$(echo "$VALID_LABELS" | grep -c . || true)
         echo "Found $LABEL_COUNT version labels ('major', 'minor', 'patch', 'none')."
+
+        # Validate that exactly one version label exists and set output value accordingly
         if [ "$LABEL_COUNT" -eq 1 ]; then
           FOUND_LABEL="$VALID_LABELS"
           echo "Exactly one version label found: '$FOUND_LABEL'"

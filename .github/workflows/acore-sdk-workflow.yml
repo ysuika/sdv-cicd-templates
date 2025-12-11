@@ -4,20 +4,27 @@ on:
   workflow_call:
     inputs:
       bump-type:
+        description: 'Require the user to select the bump type from the workflow dispatch UI and rerun the workflow if the commit message does not include a PR ID.'
         required: false
         type: string
       test-image-repo:
-        required: true
+        required: false
         type: string
       prod-image-repo:
-        required: true
+        required: false
         type: string
+      push-image-to-test:
+        description: "If the workflow is called by push-image-to-test, value will be set to ture"
+        required: false
+        default: false
+        type: boolean      
 
 permissions: {}
 
-jobs:   
+jobs:
+  # Verify that the PR creator has specified a label; fail the job if none is provided.
   check-pr-label:
-    name: Check pull request label
+    name: Check PR label
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -28,11 +35,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Check pull request label
+      - name: Check PR label
         id: check
         uses: ysuika/acore-cicd-templates/.github/actions/check-pr-label@main
 
-      - name: Fail if incorrect label count
+      # Fail the job if the PR label is not properly provided.
+      - name: Result
         if: steps.check.outputs.status == 'failure'
         run: |
           echo "Error: Pull request must have exactly one of these labels: major, minor, patch, none. Please recreate PR."
@@ -58,6 +66,7 @@ jobs:
         id: det
         uses: ysuika/acore-cicd-templates/.github/actions/determine-version@main
         with:
+          # This is only used when the workflow is triggered via workflow_dispatch, not for push events.
           bump-type: ${{ inputs.bump-type }}
 
   build-and-scan-test:
@@ -115,7 +124,7 @@ jobs:
 
   Build-and-push-test:
     name: Build and push image (test)
-    if: github.ref != 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.bump-type == 'push to test'
+    if: github.ref != 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.push-image-to-test == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

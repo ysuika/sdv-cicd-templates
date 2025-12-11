@@ -1,13 +1,13 @@
 name: "Determine Version"
-description: "Determine next semantic version for main branch on push or workflow_dispatch"
+description: "Determine the next semantic version for the main branch, triggered either by a push or a workflow_dispatch event"
 inputs:
   bump-type:
-    description: "Bump type for workflow_dispatch (major|minor|patch|none)"
+    description: "Bump type (major|minor|patch|none) when triggered via workflow_dispatch, chosen by the user through the UI"
     required: false
     default: ""
 outputs:
   new_version:
-    description: "Calculated new version tag (e.g., v1.2.3) or the currente version when bump type is 'none'"
+    description: "The calculated new version (e.g., v1.2.3), or the current version when the bump type is set to 'none'"
     value: ${{ steps.set-output.outputs.new_version }}
 runs:
   using: "composite"
@@ -17,61 +17,76 @@ runs:
       run: |
         git fetch --tags --force
 
-    - name: Handle push event (PR label-based bump)
+    # Expected scenario: determine version for push event using PR label-based bump
+    - name: Determine version for push event (PR label based bump)
       id: push
       if: ${{ github.event_name == 'push' }}
       shell: bash
       run: |
+        # Get the latest semantic version tag
         LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
           | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
           | sort -V \
           | tail -n 1 || true)
+
+        # Initialize version if no tags exist
         if [ -z "$LATEST_TAG" ]; then
           echo "No existing version tag found. Initializing to v0.1.0."
           echo "new_version=v0.1.0" >> $GITHUB_OUTPUT
           exit 0
         fi
 
+        # Extract PR ID from the merge commit message
         MERGE_COMMIT_MESSAGE=$(git log -1 --pretty=%B)
         PR_ID=$(echo "$MERGE_COMMIT_MESSAGE" | grep -oP 'Merge pull request #\K\d+' || true)
+
+        # Fail if PR ID is missing
         if [ -z "$PR_ID" ]; then
           echo "::error::Could not find a Pull Request ID in the merge commit message. Please trigger the workflow and select bump type manually."
           exit 1
         fi
 
+        # Get PR labels and determine valid version bump label
         ALL_PR_LABELS=$(gh pr view "$PR_ID" --json labels -q '.labels[].name' || true)
         VALID_LABEL=$(echo "$ALL_PR_LABELS" | grep -E '^(major|minor|patch|none)$' | head -n 1 || true)
+
+        # Fail if no valid label is found on the PR.
+        # Inform the user to re-run the workflow via workflow_dispatch and select a valid bump type.
         if [ -z "$VALID_LABEL" ]; then
-          echo "::error::No valid version label found on PR. Expect one of {major, minor, patch, none}."
+          echo "::error::No valid version label found on PR. Expect one of {major, minor, patch, none}. Please trigger the workflow again via workflow_disapatch and select the bump type."
           exit 1
         fi
         
         CURRENT_VERSION=${LATEST_TAG#v}
         
+        # If bump type is 'none', do not bump
         if [ "$VALID_LABEL" = "none" ]; then
           echo "PR has 'none' label. No version bump. Use current version v$CURRENT_VERSION"
           echo "new_version=v$CURRENT_VERSION" >> $GITHUB_OUTPUT
           exit 0
         fi
 
+        # Increment version based on PR label
         IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
         case "$VALID_LABEL" in
           major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
           minor) MINOR=$((MINOR+1)); PATCH=0 ;;
           patch) PATCH=$((PATCH+1)) ;;
+          *) echo "::error::Invalid bump-type: $BUMP_TYPE (use major|minor|patch|none)"; exit 1 ;;
         esac
         NEW_VERSION="v$MAJOR.$MINOR.$PATCH"
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
         echo "new_version=$NEW_VERSION"
 
-
-    - name: Handle workflow_dispatch (input bump)
+    # Unexpected scenario: PR ID is missing in the commit message or the PR label is not set
+    - name: Determin version for workflow_disapatch (user input based bump)
       id: dispatch
       if: ${{ github.event_name == 'workflow_dispatch' }}
       shell: bash
       run: |
         BUMP_TYPE="${{ inputs.bump-type }}"
-        # if HEAD already tagged, reuse
+
+        # Since this is not a PR event, the tag might have been added manually, reuse the tag if HEAD is already tagged. 
         HEAD_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -n 1  || true)
         if [ -n "$HEAD_TAG" ]; then
           echo "new_version=$HEAD_TAG" >> $GITHUB_OUTPUT
@@ -79,10 +94,13 @@ runs:
           exit 0
         fi
 
+        # Get latest semantic version tag
         LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
           | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
           | sort -V \
           | tail -n 1 || true)
+
+        # Initialize version if no tags exist
         if [ -z "$LATEST_TAG" ]; then
           echo "new_version=v0.1.0" >> $GITHUB_OUTPUT
           echo "No tag detected, initialize version as v0.1.0"
@@ -91,12 +109,14 @@ runs:
 
         CURRENT_VERSION=${LATEST_TAG#v}
         
+        # If bump type is 'none', do not bump
         if [ "$BUMP_TYPE" = "none" ]; then
           echo "Bump type is none. No version bump. Use current version v$CURRENT_VERSION"
           echo "new_version=v$CURRENT_VERSION" >> $GITHUB_OUTPUT
           exit 0
         fi
 
+        # Increment version based on user input
         IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
         case "$BUMP_TYPE" in
           major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
@@ -113,7 +133,7 @@ runs:
       id: set-output
       shell: bash
       run: |
-        # Prefer push result, then dispatch
+        # Set the final output version
         if [ -n "${{ steps.push.outputs.new_version }}" ]; then
           echo "new_version=${{ steps.push.outputs.new_version }}" >> $GITHUB_OUTPUT
         else
