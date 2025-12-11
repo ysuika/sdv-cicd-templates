@@ -42,11 +42,22 @@ jobs:
           tags: build
           oci: true
 
-      - name: Trivy scan 
+      - name: Trivy prepare
         run: |
           podman save ${{ env.IMAGE_NAME }}:build -o ${{ env.IMAGE_NAME }}.tar
-          trivy image myimage.tar
-          
+          wget https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl    
+
+      - name: Trivy scan 
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          input: ${{ env.IMAGE_NAME }}.tar
+          format: template
+          template: '@html.tpl'   # HTML report
+          output: trivy-report.html
+          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+          exit-code: '0'            
       - name: Upload image artifact
         uses: actions/upload-artifact@v4
         with:
