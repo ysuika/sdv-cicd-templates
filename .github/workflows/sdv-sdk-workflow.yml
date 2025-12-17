@@ -22,7 +22,7 @@ jobs:
   build-scan-test:
     name: Build and scan image (for non-main branches)
     if: github.ref != 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 60
     permissions:
       contents: read
@@ -66,7 +66,7 @@ jobs:
   check-pr-label:
     name: Check PR label
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 5
     permissions:
       contents: read
@@ -89,7 +89,7 @@ jobs:
   determine-version:
     name: Determine version
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 5
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -116,7 +116,7 @@ jobs:
     env:
       REGISTRY: ghcr.io
       IMAGE_REPO: ${{ inputs.prod-image-repo }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 60
     permissions:
       contents: read
@@ -191,7 +191,7 @@ jobs:
     name: Bump version (git tag)
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: [determine-version, build-scan-push-prod]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 5
     permissions:
       contents: write
