@@ -121,6 +121,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v5
