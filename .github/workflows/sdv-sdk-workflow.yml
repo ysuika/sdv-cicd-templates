@@ -134,6 +134,7 @@ jobs:
       - name: Build for test
         uses: docker/build-push-action@v6
         with:
+          network: host       
           file: ./Containerfile
           load: true
           tags: ${{ steps.name.outputs.image }}:test
@@ -176,6 +177,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
+          network: host     
           file: ./Containerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
